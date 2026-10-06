@@ -242,6 +242,9 @@ main{flex:1;min-height:0;display:flex;flex-direction:column}
 kbd{font:600 12px Outfit,sans-serif;background:var(--ivoire-2);border:1px solid var(--ligne);border-bottom-width:2px;border-radius:5px;padding:1px 6px}
 
 .chip-vue.active{background:var(--ivoire);border-color:var(--ivoire);color:var(--nuit);font-weight:600}
+/* Vue créée sur le téléphone : petit point laiton */
+.chip-locale::after{content:'';width:5px;height:5px;border-radius:50%;background:var(--laiton);flex:none}
+@media (pointer:coarse){ .poignee{display:none} }
 
 /* Composition d'une vue (modale) */
 .bandes-liste{list-style:none;margin:0;padding:0;border:1px solid var(--ligne);border-radius:12px;background:#fff;overflow:hidden}
@@ -794,7 +797,7 @@ kbd{font:600 12px Outfit,sans-serif;background:var(--ivoire-2);border:1px solid 
    ============================================================ */
 const LS_KEY = 'chronologie-frise-v1';
 /* À changer à chaque modification de ce fichier : « Publier » propose alors de remettre l'application en ligne */
-const VERSION_APPLI = '2026-10-06.5';
+const VERSION_APPLI = '2026-10-06.7';
 /* Version en ligne (consultation, sur téléphone) : la page est servie par un site web au lieu d'être
    ouverte depuis l'ordinateur. Les données viennent du fichier publié ; l'édition se fait sur l'ordinateur. */
 const LECTURE = (/^https?:$/.test(location.protocol) && !/^(localhost|127\.0\.0\.1|\[::1\])$/.test(location.hostname))
@@ -936,6 +939,21 @@ function anneeValide(v, defaut){
 }
 const texteValide = (v, defaut, max) => (String(v ?? '').trim() || defaut).slice(0, max);
 
+function normaliserVues(liste){
+  return (Array.isArray(liste) ? liste : [])
+    .filter(v => v && typeof v === 'object')
+    .map(v => ({
+      id: ident(v.id),
+      nom: texteValide(v.nom, 'Vue', 60),
+      bandes: (Array.isArray(v.bandes) ? v.bandes : [])
+        .filter(b => b && b.id)
+        .map(b => {
+          const m = String(b.id).match(/^([cs]):(.+)$/);
+          return { id: m ? m[1] + ':' + ident(m[2]) : (b.id === ID_SANS ? ID_SANS : null), cadre: b.cadre !== false };
+        })
+        .filter(b => b.id)
+    }));
+}
 function normaliser(obj){
   if (!obj || typeof obj !== 'object') throw new Error('format');
   if (!Array.isArray(obj.categories) || !Array.isArray(obj.elements)) throw new Error('format');
@@ -978,21 +996,9 @@ function normaliser(obj){
   if (!obj.affichage || typeof obj.affichage !== 'object') obj.affichage = {};
   if (!['essentiel', 'normal', 'tout'].includes(obj.affichage.detail)) obj.affichage.detail = 'normal';
   delete obj.masques;   // ancien système de filtres, remplacé par les vues d'étude
-  obj.vues = (Array.isArray(obj.vues) ? obj.vues : [])
-    .filter(v => v && typeof v === 'object')
-    .map(v => ({
-      id: ident(v.id),
-      nom: texteValide(v.nom, 'Vue', 60),
-      bandes: (Array.isArray(v.bandes) ? v.bandes : [])
-        .filter(b => b && b.id)
-        .map(b => {
-          const m = String(b.id).match(/^([cs]):(.+)$/);
-          return { id: m ? m[1] + ':' + ident(m[2]) : (b.id === ID_SANS ? ID_SANS : null), cadre: b.cadre !== false };
-        })
-        .filter(b => b.id)
-    }));
+  obj.vues = normaliserVues(obj.vues);
   obj.vueActive = identOuNull(obj.vueActive);
-  if (!obj.vues.some(v => v.id === obj.vueActive)) obj.vueActive = null;
+  if (!obj.vues.some(v => v.id === obj.vueActive) && !(LECTURE && vuesLocales.some(v => v.id === obj.vueActive))) obj.vueActive = null;
   obj.epoques = Array.isArray(obj.epoques)
     ? obj.epoques.filter(p => p && typeof p === 'object').map(p => {
         let debut = anneeValide(p.debut, 1), fin = anneeValide(p.fin ?? p.debut, debut);
@@ -1593,8 +1599,17 @@ async function synchroniser(manuel){
   if (recu){
     derniereVerif = Date.now();
     const date = String((recu.publication && recu.publication.date) || '');
-    if (state.publication && state.publication.date === date){ if (manuel) toast('La frise est à jour.'); }
-    else recevoir(recu);
+    const nouveau = !(state.publication && state.publication.date === date);
+    if (nouveau) recevoir(recu);
+    else if (manuel) toast('La frise est à jour.');
+    /* Application mise à jour depuis l'ordinateur : recharger la page (une seule fois par version) pour
+       en profiter, même si le téléphone avait gardé l'onglet ou l'appli ouverts en arrière-plan */
+    const appli = recu.publication && recu.publication.appli;
+    if (appli && appli !== VERSION_APPLI){
+      let deja = true;
+      try { deja = sessionStorage.getItem('chronologie-recharge') === appli; sessionStorage.setItem('chronologie-recharge', appli); } catch (e) {}
+      if (!deja){ location.reload(); return; }
+    }
   } else if (manuel){
     toast(probleme === 'absent' ? 'La frise n’a pas encore été publiée depuis l’ordinateur.'
       : els().length ? 'Pas de connexion : affichage de la dernière version reçue.' : 'Pas de connexion : la frise n’a pas pu être chargée.');
@@ -1610,7 +1625,7 @@ function recevoir(obj){
   if (premiere){
     if (ecranEtroit()) nouv.affichage.detail = 'essentiel';
   } else {
-    nouv.vueActive = nouv.vues.some(v => v.id === state.vueActive) ? state.vueActive : null;
+    nouv.vueActive = nouv.vues.concat(vuesLocales).some(v => v.id === state.vueActive) ? state.vueActive : null;
     nouv.affichage.detail = state.affichage.detail;
   }
   state = nouv;
@@ -1735,7 +1750,24 @@ function epoqueA(a){
   return liste.find(p => p.debut <= a && a < p.fin) || liste.find(p => p.debut <= a && a <= p.fin) || null;
 }
 
-const vueCourante = () => state.vues.find(v => v.id === state.vueActive) || null;
+/* Vues créées sur le téléphone (version en ligne) : gardées dans le téléphone, à côté des vues publiées,
+   et jamais remplacées par une publication. Sur l'ordinateur, toutes les vues sont dans state.vues. */
+const LS_VUES_LOCALES = 'chronologie-vues-locales-v1';
+let vuesLocales = (() => {
+  if (!LECTURE) return [];
+  try { return normaliserVues(JSON.parse(localStorage.getItem(LS_VUES_LOCALES) || '[]')); } catch (e) { return []; }
+})();
+const toutesVues = () => LECTURE ? state.vues.concat(vuesLocales) : state.vues;
+const estVueLocale = v => !!v && vuesLocales.includes(v);
+/* Après une modification des vues : sur le téléphone, on enregistre ses vues ; sinon commit() */
+function enregistrerVues(){
+  if (!LECTURE){ commit(); return; }
+  try { localStorage.setItem(LS_VUES_LOCALES, JSON.stringify(vuesLocales)); } catch (e) {}
+  versionDonnees++;
+  rendreVues();
+  redessiner();
+}
+const vueCourante = () => toutesVues().find(v => v.id === state.vueActive) || null;
 /* Bandes de la vue active, dans l'ordre choisi. « Vue complète » = toutes les bandes. */
 function calculerBandesAffichees(){
   const toutes = toutesBandes();
@@ -1753,14 +1785,16 @@ function rendreVues(){
   let html = '<span class="filtres-libelle">Vues</span>';
   html += `<button class="chip chip-vue${!v ? ' active' : ''}" data-type="vue" data-id=""
     title="Toutes les bandes">Vue complète</button>`;
-  state.vues.forEach(x => {
-    html += `<button class="chip chip-vue${v && v.id === x.id ? ' active' : ''}" data-type="vue" data-id="${x.id}">${echap(x.nom)}</button>`;
+  toutesVues().forEach(x => {
+    const locale = estVueLocale(x);
+    html += `<button class="chip chip-vue${v && v.id === x.id ? ' active' : ''}${locale ? ' chip-locale' : ''}" data-type="vue" data-id="${x.id}"
+      ${locale ? 'title="Vue créée sur ce téléphone"' : ''}>${echap(x.nom)}</button>`;
   });
-  if (!LECTURE){
-    html += '<span class="chip-sep"></span>';
-    if (v) html += `<button class="chip chip-sub" data-type="edit-vue" title="Choisir et ordonner les bandes de « ${echap(v.nom)} »">✎ Composer</button>`;
-    html += `<button class="chip chip-sub" data-type="nouvelle-vue">＋ Nouvelle vue</button>`;
-  }
+  html += '<span class="chip-sep"></span>';
+  /* Sur le téléphone, seules les vues créées sur le téléphone se composent */
+  if (v && (!LECTURE || estVueLocale(v)))
+    html += `<button class="chip chip-sub" data-type="edit-vue" title="Choisir et ordonner les bandes de « ${echap(v.nom)} »">✎ Composer</button>`;
+  html += `<button class="chip chip-sub" data-type="nouvelle-vue">＋ Nouvelle vue</button>`;
   $('#filtres').innerHTML = html;
 }
 
@@ -1812,22 +1846,24 @@ function modalVue(v){
     corps: `
       <div class="champ"><label>Nom de la vue</label>
         <input type="text" name="nom" required maxlength="60" value="${echap(v ? v.nom : '')}" placeholder="Ex. : Royaume divisé"></div>
-      <div class="champ"><label>Bandes — cochez celles à afficher, glissez pour les ordonner</label>
+      <div class="champ"><label>Bandes — cochez celles à afficher, ${TACTILE ? 'ordonnez-les avec ▲ ▼' : 'glissez pour les ordonner'}</label>
         ${toutes.length ? `<ul class="bandes-liste">${ordre.map(ligne).join('')}</ul>`
           : '<p class="ed-vide">Aucune catégorie pour l’instant : créez-en dans l’onglet Édition.</p>'}
         <p class="aide">« période » : la frise se cadre sur la période couverte par cette bande.
         Décochez-la pour une bande de contexte (ex. Événements) : elle ne montrera que ce qui tombe
         dans la période des autres bandes.</p></div>
+      ${LECTURE ? '<p class="aide">Cette vue reste sur ce téléphone : elle n’est pas envoyée sur l’ordinateur, et les publications ne l’effacent pas.</p>' : ''}
       ${v ? '<button type="button" class="btn btn-ghost btn-petit" data-suppr-vue>Supprimer cette vue</button>' : ''}`,
     onOuvert: f => {
       const liste = f.querySelector('.bandes-liste');
       const suppr = f.querySelector('[data-suppr-vue]');
       if (suppr) suppr.addEventListener('click', () => confirmer(
         `Supprimer la vue « ${echap(v.nom)} » ?<br>Les éléments et catégories ne sont pas touchés.`, () => {
-          state.vues = state.vues.filter(x => x.id !== v.id);
+          if (LECTURE) vuesLocales = vuesLocales.filter(x => x.id !== v.id);
+          else state.vues = state.vues.filter(x => x.id !== v.id);
           activerVue(null);
-          commit();
-          toast('Vue supprimée.', ANNULER);
+          enregistrerVues();
+          toast('Vue supprimée.', LECTURE ? undefined : ANNULER);
         }));
       if (!liste) return;
       let glisse = null;
@@ -1869,9 +1905,9 @@ function modalVue(v){
       if (!bandes.length){ toast('Cochez au moins une bande.'); return false; }
       let id;
       if (v){ v.nom = nom; v.bandes = bandes; id = v.id; }
-      else { id = uid(); state.vues.push({ id, nom, bandes }); toast('Vue créée.'); }
+      else { id = uid(); (LECTURE ? vuesLocales : state.vues).push({ id, nom, bandes }); toast('Vue créée.'); }
       activerVue(id);
-      commit();
+      enregistrerVues();
     }
   });
 }
