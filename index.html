@@ -794,7 +794,7 @@ kbd{font:600 12px Outfit,sans-serif;background:var(--ivoire-2);border:1px solid 
    ============================================================ */
 const LS_KEY = 'chronologie-frise-v1';
 /* À changer à chaque modification de ce fichier : « Publier » propose alors de remettre l'application en ligne */
-const VERSION_APPLI = '2026-10-06.3';
+const VERSION_APPLI = '2026-10-06.5';
 /* Version en ligne (consultation, sur téléphone) : la page est servie par un site web au lieu d'être
    ouverte depuis l'ordinateur. Les données viennent du fichier publié ; l'édition se fait sur l'ordinateur. */
 const LECTURE = (/^https?:$/.test(location.protocol) && !/^(localhost|127\.0\.0\.1|\[::1\])$/.test(location.hostname))
@@ -1720,6 +1720,16 @@ function calculerToutesBandes(){
 /* ---------- Époques ---------- */
 const epoquesTriees = () => [...state.epoques].sort((a, b) => a.debut - b.debut);
 const afficherEpoques = () => state.affichage.epoques && state.epoques.length > 0;
+/* Époques réparties en lignes : celle qui chevauche la précédente passe sur la ligne suivante */
+const lignesEpoques = () => memo('lignesEpoques', () => {
+  const lignes = [];
+  epoquesTriees().forEach(p => {
+    let l = lignes.find(l => pos(l[l.length - 1].fin) <= pos(p.debut));
+    if (!l) lignes.push(l = []);
+    l.push(p);
+  });
+  return lignes;
+});
 function epoqueA(a){
   const liste = epoquesTriees();
   return liste.find(p => p.debut <= a && a < p.fin) || liste.find(p => p.debut <= a && a <= p.fin) || null;
@@ -1895,6 +1905,7 @@ function majPanneau(){
     </div>
     <h2 class="panneau-titre">${echap(ev.titre)}</h2>
     <p class="panneau-dates">${echap(formatPlage(ev))}</p>
+    <button class="lien" data-action="cadrer" data-id="${ev.id}">⤢ Cadrer la frise sur ${ev.fin != null && ev.fin !== ev.debut ? 'cette période' : 'cette date'}</button>
     ${parent ? `<button class="lien" data-action="choisir" data-id="${parent.id}">↑ ${echap(parent.titre)}</button>` : ''}
     ${ev.description ? `<p class="panneau-desc">${echap(ev.description)}</p>` : ''}
     ${!ev.parentId && !LECTURE ? `<div class="panneau-importance"><span>Importance</span>
@@ -2639,6 +2650,7 @@ let hauteursAff = new Map();    // bande -> hauteur affichée (animée)
 let yAff = new Map();           // élément -> ordonnée affichée dans sa bande (animée)
 const cacheLargeur = new Map(); // titre -> largeur du texte
 const cacheMise = new Map();    // bande -> placement des éléments (inchangé quand on fait glisser)
+const dernieresVoies = new Map(); // bande -> lignes affichées au dernier dessin (point de départ d'un pincement)
 const MAX_VOIES = { essentiel: 5, normal: 10, tout: Infinity };   // voies par bande selon le niveau de détail
 let zonesGroupes = [];          // pastilles « +N » cliquables [{x,y,w,h,gr}]
 let hoverGroupe = null;
@@ -2715,6 +2727,22 @@ function cadrerSur(min, max){
   vue.ppa = clamp(W / (span * 1.16), lim.min, lim.max);
   vue.debut = (min + max) / 2 - (W / vue.ppa) / 2;
   clampVue(W);
+  redessiner();
+}
+/* Cadre la frise sur la durée d'un élément (double toucher, bouton « Cadrer » de la fiche),
+   dans la partie que la fiche ne cache pas */
+function cadrerSurElement(id){
+  const e = byId(id);
+  if (!e) return;
+  const W = largeurScene();
+  const f = fichePetitEcran();
+  const libre = f && f.cote ? f.p.offsetLeft - 12 : W;
+  const a0 = pos(e.debut), a1 = pos(finDe(e));
+  const lim = limitesPPA(W);
+  vue.ppa = clamp(libre / (Math.max(a1 - a0, 24) * 1.3), lim.min, lim.max);
+  vue.debut = (a0 + a1) / 2 - (libre / 2) / vue.ppa;
+  clampVue(W);
+  defilerVers = id;
   redessiner();
 }
 function cadrerSurBande(id){
@@ -2857,6 +2885,16 @@ function miseEnPageBande(bid, tous){
   const cle = [ppa, limite, selectionId, versionDonnees, tous.length].join('|');
   const enCache = cacheMise.get(bid);
   if (enCache && enCache.cle === cle) return enCache;
+  if (pince && enCache){
+    /* Pincement : même rangement qu'au début du geste, positions recalculées au zoom courant */
+    const base = enCache.base || enCache;
+    const k = ppa / base.ppa;
+    const places = base.places.map(g => Object.assign(geometrie(g.e, a => a * ppa), { voie: g.voie, prio: g.prio }));
+    const groupes = base.groupes.map(gr => Object.assign({}, gr, { x: gr.x * k, xDeb: gr.xDeb * k, xFin: gr.xFin * k, xMax: gr.xMax * k }));
+    const res = { cle, places, groupes, base, ppa };
+    cacheMise.set(bid, res);
+    return res;
+  }
 
   const sel = selectionId ? byId(selectionId) : null;
   const liesSel = new Set(sel ? (sel.liens || []).map(l => l.id) : []);   // éléments liés : toujours affichés
@@ -2896,7 +2934,7 @@ function miseEnPageBande(bid, tous){
     gr.items.sort((p, q) => (p.importance || 2) - (q.importance || 2) || p.debut - q.debut);
   });
 
-  const res = { cle, places, groupes };
+  const res = { cle, places, groupes, ppa };
   cacheMise.set(bid, res);
   return res;
 }
@@ -3001,7 +3039,8 @@ function dessiner(){
   const H = rendu ? rendu.H : (canvas.clientHeight || 300);
   const compact = !rendu && H < 360;   // téléphone à l'horizontale : en-tête plus bas
   REGLE_H = compact ? 42 : 54;
-  EPOQUES_H = compact ? 18 : 22;
+  const LIGNE_EP = compact ? 18 : 22;    // hauteur d'une ligne d'époques
+  EPOQUES_H = LIGNE_EP * Math.max(1, lignesEpoques().length);
   AXE_H = REGLE_H + (afficherEpoques() ? EPOQUES_H : 0);
   ctx.clearRect(0, 0, W, H);
   ctx.fillStyle = '#141d27';
@@ -3029,7 +3068,7 @@ function dessiner(){
 
   let anime = false;
   const lerp = (cour, cible) => {
-    if (cour == null || MOUV_REDUIT || rendu) return cible;
+    if (cour == null || MOUV_REDUIT || rendu || pince) return cible;
     const n = cour + (cible - cour) * 0.28;
     if (Math.abs(cible - n) < 0.5) return cible;
     anime = true;
@@ -3049,7 +3088,14 @@ function dessiner(){
     const vis = places.filter(g => g.rx1 + off > -30 && g.rx0 + off < W + 30);
     /* Une pastille reste visible tant que ses éléments (périodes comprises) traversent l'écran */
     const grVis = groupes.filter(gr => gr.xMax + off + gr.w / 2 > -10 && gr.xDeb + off - gr.w / 2 < W + 10);
-    const voies = [...new Set(vis.map(g => g.voie))].sort((p, q) => p - q);
+    let voies = [...new Set(vis.map(g => g.voie))].sort((p, q) => p - q);
+    if (pince){
+      /* Pincement : les lignes déjà affichées gardent leur place ; une ligne qui apparaît s'ajoute en bas */
+      const figees = pince.voies.get(b.id) || [];
+      voies = figees.concat(voies.filter(v => !figees.includes(v)));
+      pince.voies.set(b.id, voies);
+    }
+    dernieresVoies.set(b.id, voies);
     const rang = new Map(voies.map((v, i) => [v, i]));
     vis.forEach(g => {
       g.yCible = ENTETE_H + rang.get(g.voie) * VOIE_H + (VOIE_H - ELT_H) / 2;
@@ -3072,12 +3118,21 @@ function dessiner(){
   yAff = nouvY;
   contenuH = cumul + MARGE_BAS;
 
+  /* Élément maintenu sous les doigts (pendant le pincement, puis le temps que le rangement s'anime) */
+  if (ancrage && !rendu){
+    for (const m of mises){
+      const g = m.vis.find(g => g.e.id === ancrage.id);
+      if (g){ scrollY = AXE_H + m.top + g.y - ancrage.y; break; }
+    }
+    if (!pince && !anime) ancrage = null;
+  }
+
   if (defilerVers){
     for (const m of mises){
       const g = m.vis.find(g => g.e.id === defilerVers);
       if (g){
-        /* ne défiler que si l'élément n'est pas déjà entièrement visible */
-        const yEl = m.top + g.yCible, hv = hauteurVisible();
+        /* ne défiler que si l'élément n'est pas déjà entièrement visible (fiche du bas déduite) */
+        const yEl = m.top + g.yCible, hv = hauteurVisible() - margePanneau();
         if (yEl < scrollY + 6 || yEl + ELT_H > scrollY + hv - 60) scrollY = yEl + ELT_H / 2 - hv / 2;
         break;
       }
@@ -3331,16 +3386,16 @@ function dessiner(){
   /* Bande des époques */
   zonesEpoques = [];
   if (afficherEpoques()){
-    const y = REGLE_H, h = EPOQUES_H, FL = 18;
+    const h = LIGNE_EP, FL = 18;
     ctx.fillStyle = '#18222e';
-    ctx.fillRect(0, y, W, h);
-    const liste = epoquesTriees();
+    ctx.fillRect(0, REGLE_H, W, EPOQUES_H);
     const centre = aDe(W / 2);
-    const iC = liste.findIndex(p => pos(p.debut) <= centre && centre <= pos(p.fin));
-    liste.forEach((p, i) => {
+    /* Une ligne par niveau de chevauchement (une seule si les époques se suivent) */
+    lignesEpoques().forEach((liste, ligne) => liste.forEach((p, i) => {
+      const y = REGLE_H + ligne * h;
       const x0 = xDe(pos(p.debut)), x1 = xDe(pos(p.fin));
       if (x1 < 0 || x0 > W) return;
-      const courant = i === iC, survol = hoverEpoque === p;
+      const courant = pos(p.debut) <= centre && centre <= pos(p.fin), survol = hoverEpoque === p;
       const v0 = Math.max(0, x0), v1 = Math.min(W, x1);
       ctx.fillStyle = survol ? 'rgba(197,164,78,0.26)' : courant ? 'rgba(197,164,78,0.17)'
         : (i % 2 ? 'rgba(197,164,78,0.05)' : 'rgba(197,164,78,0.1)');
@@ -3358,19 +3413,19 @@ function dessiner(){
         ctx.fillText(tronquer(p.nom.toUpperCase(), l1 - l0 - 12), (l0 + l1) / 2, y + h / 2 + 0.5);
         try { ctx.letterSpacing = '0px'; } catch(e){}
       }
-      zonesEpoques.push({ x: v0, w: v1 - v0, ep: p });
-    });
-    /* Flèches vers l'époque précédente / suivante quand elle sort de l'écran */
+      zonesEpoques.push({ x: v0, w: v1 - v0, y, h, ep: p });
+    }));
+    /* Flèches vers l'époque précédente / suivante quand elle sort de l'écran (sur toute la hauteur) */
     const prec = epoqueVoisine(-1), suiv = epoqueVoisine(1);
     [[prec, 0, '‹', q => xDe(pos(q.debut)) < 0], [suiv, W - FL, '›', q => xDe(pos(q.fin)) > W]].forEach(([q, x, car, horsChamp]) => {
       if (!q || !horsChamp(q)) return;
       ctx.fillStyle = hoverEpoque === q ? '#3a4a5c' : '#243240';
-      ctx.fillRect(x, y + 2, FL, h - 4);
+      ctx.fillRect(x, REGLE_H + 2, FL, EPOQUES_H - 4);
       ctx.fillStyle = '#e3cf95';
       ctx.font = '600 15px Outfit, sans-serif';
       ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
-      ctx.fillText(car, x + FL / 2, y + h / 2);
-      zonesEpoques.push({ x, w: FL, ep: q, fleche: car });
+      ctx.fillText(car, x + FL / 2, REGLE_H + EPOQUES_H / 2);
+      zonesEpoques.push({ x, w: FL, y: REGLE_H, h: EPOQUES_H, ep: q, fleche: car });
     });
   }
 
@@ -3412,7 +3467,7 @@ function dessiner(){
    10. INTERACTIONS CANVAS
    ============================================================ */
 const pointeurs = new Map();
-let panDepart = null, distDepart = 0, ppaDepart = 0, aBouge = false, barreSaisie = null;
+let panDepart = null, aBouge = false, barreSaisie = null;
 
 function positionDans(ev){
   const r = canvas.getBoundingClientRect();
@@ -3443,7 +3498,7 @@ function trouverEpoque(mx, my){
   if (my < REGLE_H || my >= AXE_H) return null;
   for (let i = zonesEpoques.length - 1; i >= 0; i--){
     const z = zonesEpoques[i];
-    if (mx >= z.x && mx <= z.x + z.w) return z;
+    if (mx >= z.x && mx <= z.x + z.w && my >= z.y && my < z.y + z.h) return z;
   }
   return null;
 }
@@ -3542,8 +3597,9 @@ function majCoupeSouris(mx){
 canvas.addEventListener('pointerdown', ev => {
   canvas.setPointerCapture(ev.pointerId);
   pointeurs.set(ev.pointerId, { x: ev.clientX, y: ev.clientY });
-  aBouge = false;
   if (pointeurs.size === 1){
+    aBouge = false;
+    ancrage = null;
     const { mx, my, r } = positionDans(ev);
     if (barre && mx >= r.width - 16 && my >= AXE_H){
       barreSaisie = { y: ev.clientY, scroll: scrollY };
@@ -3554,13 +3610,49 @@ canvas.addEventListener('pointerdown', ev => {
       canvas.classList.add('saisi');
     }
   } else if (pointeurs.size === 2){
-    const pts = [...pointeurs.values()];
-    distDepart = Math.hypot(pts[0].x - pts[1].x, pts[0].y - pts[1].y) || 1;
-    ppaDepart = vue.ppa;
-    panDepart = null;
-    barreSaisie = null;
+    debutPince();
   }
 });
+
+/* ---------- Pincement à deux doigts ----------
+   Pendant le geste, le rangement des éléments en lignes est figé (ils ne changent ni de ligne ni de
+   bande, sans animation) et l'élément le plus proche des doigts reste sous eux : on zoome et on se
+   déplace d'un même geste, comme sur une carte. Le rangement est refait quand on relâche. */
+let pince = null;     // { dist0, ppa0, annee0, cy0, scroll0, voies: bande -> lignes affichées }
+let ancrage = null;   // { id, y } : élément maintenu à cette hauteur d'écran
+let dernierToucher = null;   // pour reconnaître un double toucher { t, x, y, id }
+function milieuDoigts(){
+  const [a, b] = [...pointeurs.values()];
+  const r = canvas.getBoundingClientRect();
+  return { cx: (a.x + b.x) / 2 - r.left, cy: (a.y + b.y) / 2 - r.top, dist: Math.hypot(a.x - b.x, a.y - b.y) || 1 };
+}
+function debutPince(){
+  const { cx, cy, dist } = milieuDoigts();
+  pince = { dist0: dist, ppa0: vue.ppa, annee0: vue.debut + cx / vue.ppa, cy0: cy, scroll0: scrollY, voies: new Map(dernieresVoies) };
+  const z = plusProcheZone(zonesHit.filter(z => z.y >= AXE_H), cx, cy, 80);
+  ancrage = z ? { id: z.id, y0: z.y, y: z.y } : null;
+  panDepart = null;
+  barreSaisie = null;
+  aBouge = true;        // la fin du geste n'est pas un toucher
+}
+function deplacerPince(){
+  const { cx, cy, dist } = milieuDoigts();
+  const W = largeurScene();
+  const lim = limitesPPA(W);
+  vue.ppa = clamp(pince.ppa0 * dist / pince.dist0, lim.min, lim.max);
+  vue.debut = pince.annee0 - cx / vue.ppa;   // l'année visée suit le milieu des doigts
+  clampVue(W);
+  if (ancrage) ancrage.y = ancrage.y0 + (cy - pince.cy0);
+  else { scrollY = pince.scroll0 - (cy - pince.cy0); clampScroll(); }
+  redessiner();
+}
+function finPince(){
+  pince = null;
+  cacheMise.clear();    // rangement refait au zoom final (l'ancrage suit l'animation)
+  const [p] = [...pointeurs.values()];
+  if (p) panDepart = { x: p.x, y: p.y, debut: vue.debut, scroll: scrollY };   // le doigt restant fait glisser
+  redessiner();
+}
 canvas.addEventListener('pointermove', ev => {
   if (pointeurs.has(ev.pointerId)){
     const p = pointeurs.get(ev.pointerId);
@@ -3577,17 +3669,8 @@ canvas.addEventListener('pointermove', ev => {
       scrollY = panDepart.scroll - (ev.clientY - panDepart.y);
       clampScroll();
       redessiner();
-    } else if (pointeurs.size === 2){
-      const pts = [...pointeurs.values()];
-      const dist = Math.hypot(pts[0].x - pts[1].x, pts[0].y - pts[1].y) || 1;
-      const cx = (pts[0].x + pts[1].x) / 2 - canvas.getBoundingClientRect().left;
-      const ancre = vue.debut + cx / vue.ppa;
-      vue.ppa = ppaDepart * (dist / distDepart);
-      const lim = limitesPPA(largeurScene());
-      vue.ppa = clamp(vue.ppa, lim.min, lim.max);
-      vue.debut = ancre - cx / vue.ppa;
-      clampVue(largeurScene());
-      redessiner();
+    } else if (pointeurs.size === 2 && pince){
+      deplacerPince();
     }
     return;
   }
@@ -3636,6 +3719,7 @@ canvas.addEventListener('pointermove', ev => {
 function finPointeur(ev){
   if (pointeurs.has(ev.pointerId)){
     pointeurs.delete(ev.pointerId);
+    if (pince && pointeurs.size < 2) finPince();
     if (!pointeurs.size){
       canvas.classList.remove('saisi');
       const etaitBarre = !!barreSaisie;
@@ -3643,6 +3727,15 @@ function finPointeur(ev){
       if (!aBouge && !etaitBarre && ev.type === 'pointerup'){
         const { mx, my } = positionDans(ev);
         const marge = ev.pointerType === 'touch' ? 7 : 0;
+        /* Double toucher : cadrer sur l'élément touché la première fois, ou zoomer à cet endroit */
+        const prec = dernierToucher;
+        dernierToucher = null;
+        if (ev.pointerType === 'touch' && prec && ev.timeStamp - prec.t < 380 && Math.hypot(mx - prec.x, my - prec.y) < 30 && my >= AXE_H){
+          if (prec.id) cadrerSurElement(prec.id);
+          else zoomVers(2, mx);
+          panDepart = null;
+          return;
+        }
         const ze = trouverEpoque(mx, my);
         const elExact = trouverElement(mx, my);
         const gr = elExact ? null : trouverGroupe(mx, my, marge);
@@ -3665,6 +3758,7 @@ function finPointeur(ev){
           const id = elExact || trouverElement(mx, my, marge);
           selectionner(id);
           degagerSousFiche(id);
+          if (ev.pointerType === 'touch') dernierToucher = { t: ev.timeStamp, x: mx, y: my, id };
         }
       }
       panDepart = null;
@@ -3699,6 +3793,7 @@ canvas.addEventListener('wheel', ev => {
   if (coupe.actif && !coupe.fixe) majCoupeSouris(ev.clientX - r.left);
 }, { passive: false });
 canvas.addEventListener('dblclick', ev => {
+  if (TACTILE) return;   // au doigt, le double toucher est géré dans finPointeur
   const { mx, my } = positionDans(ev);
   if (my < AXE_H || trouverBande(mx, my) || trouverGroupe(mx, my)) return;
   zoomVers(1.8, mx);
@@ -4190,8 +4285,9 @@ document.addEventListener('click', ev => {
   if (!cible) return;
   const action = cible.dataset.action;
   const id = cible.dataset.id;
-  if (LECTURE && !['fermer-panneau', 'choisir', 'choisir-coupe', 'fermer-coupe', 'suivre-coupe'].includes(action)) return;
+  if (LECTURE && !['fermer-panneau', 'choisir', 'cadrer', 'choisir-coupe', 'fermer-coupe', 'suivre-coupe'].includes(action)) return;
   switch (action){
+    case 'cadrer': cadrerSurElement(id); break;
     case 'aller-edition': montrerVue('edition'); break;
     case 'fermer-panneau': selectionner(null); redessiner(); break;
     case 'choisir': selectionner(id); redessiner(); break;
