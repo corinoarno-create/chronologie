@@ -1,5 +1,5 @@
 'use strict';
-const VERSION = "2026-10-06.2";
+const VERSION = "2026-10-06.3";
 (function travailleurHorsLigne(){
   const CACHE = 'chronologie-' + VERSION;
   self.addEventListener('install', e => {
@@ -24,7 +24,7 @@ const VERSION = "2026-10-06.2";
       return rep;
     };
     if (!local){ e.respondWith(caches.match(cle).then(r => r || fetch(req).then(garder))); return; }   // polices : cache d'abord
-    e.respondWith(fetch(req).then(garder).catch(() =>                                                // page : réseau d'abord
+    e.respondWith(fetch(req.url, { cache: 'no-cache' }).then(garder).catch(() =>                    // page : réseau d'abord, sans copie périmée
       caches.match(cle).then(r => r || caches.match(new URL('./', location.href).href))));
   });
 })();

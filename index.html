@@ -794,7 +794,7 @@ kbd{font:600 12px Outfit,sans-serif;background:var(--ivoire-2);border:1px solid 
    ============================================================ */
 const LS_KEY = 'chronologie-frise-v1';
 /* À changer à chaque modification de ce fichier : « Publier » propose alors de remettre l'application en ligne */
-const VERSION_APPLI = '2026-10-06.2';
+const VERSION_APPLI = '2026-10-06.3';
 /* Version en ligne (consultation, sur téléphone) : la page est servie par un site web au lieu d'être
    ouverte depuis l'ordinateur. Les données viennent du fichier publié ; l'édition se fait sur l'ordinateur. */
 const LECTURE = (/^https?:$/.test(location.protocol) && !/^(localhost|127\.0\.0\.1|\[::1\])$/.test(location.hostname))
@@ -1277,7 +1277,8 @@ function adresseSite(){
 function majEtatPublication(){
   const n = publi.modifs, pl = n > 1 ? 's' : '';
   $('#etat-publication').innerHTML = !publi.date ? 'Pas encore de version en ligne pour le téléphone.'
-    : `Version en ligne publiée ${depuis(publi.date)}${n ? ` · <b>${n} modification${pl} à publier</b>` : ' · à jour'}.`;
+    : `Version en ligne publiée ${depuis(publi.date)}${n ? ` · <b>${n} modification${pl} à publier</b>` : ' · à jour'}`
+      + (miseEnLigne ? ' · <b>mise en ligne par GitHub en cours…</b>' : '.');
   $('#btn-publi-reglages').hidden = !publiConfiguree();
 }
 
@@ -1341,7 +1342,7 @@ function travailleurHorsLigne(){
       return rep;
     };
     if (!local){ e.respondWith(caches.match(cle).then(r => r || fetch(req).then(garder))); return; }   // polices : cache d'abord
-    e.respondWith(fetch(req).then(garder).catch(() =>                                                // page : réseau d'abord
+    e.respondWith(fetch(req.url, { cache: 'no-cache' }).then(garder).catch(() =>                    // page : réseau d'abord, sans copie périmée
       caches.match(cle).then(r => r || caches.match(new URL('./', location.href).href))));
   });
 }
@@ -1380,6 +1381,57 @@ async function envoyerFichier(chemin, base64, message){
   const r = await appelGitHub('PUT', '/contents/' + chemin, Object.assign({ message, content: base64 }, sha ? { sha } : {}));
   if (!r.ok) throw erreurGitHub(r);
 }
+/* Envoie tous les fichiers en un seul « commit » : GitHub Pages ne fait alors qu'une mise en ligne
+   (fichier par fichier, chaque envoi en déclenche une et elles se bloquent entre elles).
+   Renvoie false si le dépôt est encore vide : il faut alors passer par envoyerFichier(). */
+async function envoyerCommit(fichiers, message, branche, progres){
+  const ref = await appelGitHub('GET', '/git/ref/heads/' + branche);
+  if (!ref.ok){ if (ref.status === 404 || ref.status === 409) return false; throw erreurGitHub(ref); }
+  const parent = ref.json.object.sha;
+  const commit = await appelGitHub('GET', '/git/commits/' + parent);
+  if (!commit.ok) throw erreurGitHub(commit);
+  const arbre = [];
+  for (let i = 0; i < fichiers.length; i++){
+    progres(i + 1);
+    const [chemin, contenu] = fichiers[i];
+    const b = await appelGitHub('POST', '/git/blobs', { content: contenu, encoding: 'base64' });
+    if (!b.ok) throw erreurGitHub(b);
+    arbre.push({ path: chemin, mode: '100644', type: 'blob', sha: b.json.sha });
+  }
+  const t = await appelGitHub('POST', '/git/trees', { base_tree: commit.json.tree.sha, tree: arbre });
+  if (!t.ok) throw erreurGitHub(t);
+  const c = await appelGitHub('POST', '/git/commits', { message, tree: t.json.sha, parents: [parent] });
+  if (!c.ok) throw erreurGitHub(c);
+  const maj = await appelGitHub('PATCH', '/git/refs/heads/' + branche, { sha: c.json.sha });
+  if (!maj.ok) throw erreurGitHub(maj);
+  return true;
+}
+/* Après une publication : on interroge le site jusqu'à ce qu'il serve la nouvelle version */
+let miseEnLigne = null, minuteurMiseEnLigne = null;
+function suivreMiseEnLigne(date){
+  clearTimeout(minuteurMiseEnLigne);
+  miseEnLigne = date;
+  majEtatPublication();
+  const debut = Date.now();
+  const verifier = async () => {
+    let servie = null;
+    try {
+      const r = await fetch(adresseSite() + FICHIER_DONNEES + '?t=' + Date.now(), { cache: 'no-store' });
+      if (r.ok){ const d = await r.json(); servie = d.publication && d.publication.date; }
+    } catch (e) {}
+    if (miseEnLigne !== date) return;   // une publication plus récente a pris le relais
+    if (servie === date){
+      miseEnLigne = null;
+      majEtatPublication();
+      toast('La nouvelle version est en ligne : rouvrez la frise sur le téléphone.');
+    } else if (Date.now() - debut > 20 * 60e3){
+      miseEnLigne = null;
+      majEtatPublication();
+      toast('GitHub n’a toujours pas mis la nouvelle version en ligne. Réessayez « Publier en ligne » plus tard.');
+    } else minuteurMiseEnLigne = setTimeout(verifier, 15000);
+  };
+  minuteurMiseEnLigne = setTimeout(verifier, 15000);
+}
 /* Active le site GitHub Pages du dépôt (droit « Pages » du jeton) ; false s'il faut le faire à la main */
 async function activerPages(branche){
   const adresse = r => { const u = r.json && r.json.html_url; publi.site = /^https?:\/\//.test(u || '') ? u : ''; };
@@ -1410,20 +1462,24 @@ async function publier(html){
       ['icon-512.png', iconePNG(512)],
       ['sw.js', texteEnBase64(codeServiceWorker())]);
     fichiers.push([FICHIER_DONNEES, texteEnBase64(JSON.stringify(Object.assign({}, state, { publication: { date, appli: VERSION_APPLI } })))]);
-    for (let i = 0; i < fichiers.length; i++){
-      const [chemin, contenu] = fichiers[i];
-      bouton.textContent = fichiers.length > 1 ? `Publication… ${i + 1}/${fichiers.length}` : 'Publication…';
-      await envoyerFichier(chemin, contenu, `Chronologie : ${chemin === FICHIER_DONNEES ? 'données' : chemin} du ${date.slice(0, 10)}`);
+    const branche = (depot.json && depot.json.default_branch) || 'main';
+    const progres = i => { bouton.textContent = fichiers.length > 1 ? `Publication… ${i}/${fichiers.length}` : 'Publication…'; };
+    const message = `Chronologie : ${html ? 'application et données' : 'données'} du ${date.slice(0, 10)}`;
+    if (!await envoyerCommit(fichiers, message, branche, progres)){
+      for (let i = 0; i < fichiers.length; i++){   // dépôt vide : premier envoi fichier par fichier
+        progres(i + 1);
+        await envoyerFichier(fichiers[i][0], fichiers[i][1], message);
+      }
     }
-    const pagesOk = (premiere || html) ? await activerPages((depot.json && depot.json.default_branch) || 'main') : true;
+    const pagesOk = (premiere || html) ? await activerPages(branche) : true;
     publi.date = date;
     publi.modifs = 0;
     if (html) publi.appli = VERSION_APPLI;
     ecrirePubli();
     majEtatPublication();
+    suivreMiseEnLigne(date);
     if (premiere || !pagesOk) modalPublie(pagesOk);
-    else toast('Publié : le téléphone recevra cette version à sa prochaine ouverture (d’ici une à deux minutes).',
-               { libelle: 'Voir le site', fn: () => window.open(adresseSite(), '_blank', 'noopener') });
+    else toast('Envoyé. GitHub met la version en ligne (en général une à deux minutes) : un message s’affichera ici quand ce sera fait.');
   } catch (e) {
     toast('Publication impossible : ' + e.message);
   } finally {
@@ -1595,7 +1651,7 @@ function initLecture(){
   lien.rel = 'manifest';
   lien.href = 'manifest.webmanifest';
   document.head.appendChild(lien);
-  if ('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js').catch(() => {});
+  if ('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js', { updateViaCache: 'none' }).catch(() => {});
   $('#etat-lecture').addEventListener('click', () => synchroniser(true));
   document.addEventListener('visibilitychange', () => {
     if (document.visibilityState === 'visible' && Date.now() - derniereVerif > 30000) synchroniser(false);
