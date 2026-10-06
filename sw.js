@@ -1,5 +1,5 @@
 'use strict';
-const VERSION = "2026-10-06";
+const VERSION = "2026-10-06.2";
 (function travailleurHorsLigne(){
   const CACHE = 'chronologie-' + VERSION;
   self.addEventListener('install', e => {
