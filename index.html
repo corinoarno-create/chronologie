@@ -585,8 +585,25 @@ kbd{font:600 12px Outfit,sans-serif;background:var(--ivoire-2);border:1px solid 
 /* Téléphone à l'horizontale : toute la hauteur pour la frise */
 @media (max-height:500px) and (orientation:landscape){
   .lecture .topbar{display:none}
-  .filtres{flex-wrap:nowrap;overflow-x:auto;scrollbar-width:none}
+  /* vues et recherche sur une seule ligne */
+  .barre-frise{flex-wrap:nowrap}
+  .filtres{flex:1 1 auto;flex-wrap:nowrap;overflow-x:auto;scrollbar-width:none;padding:6px 10px;gap:6px}
+  .filtres-libelle{display:none}
+  .chip{padding:4px 11px;font-size:12.5px}
+  .recherche-frise{flex:0 0 auto;padding:5px 10px 5px 0}
+  .recherche-champ input{width:min(200px,30vw);height:30px}
+  /* commandes plus petites */
+  .hud{gap:6px}
+  .zoom-ctrl button{height:30px;width:34px}
+  .seg-nuit,.hud-btn{height:30px}
+  /* fiche sur le côté : la frise reste visible à gauche */
+  .panneau{top:6px;bottom:6px;left:auto;right:8px;width:min(340px,48%);max-height:none;padding:12px 14px;
+    transform:translateX(calc(100% + 30px))}
+  .panneau.ouvert{transform:translateX(0)}
+  .panneau-titre{font-size:20px}
 }
+/* Écran tactile : l'export d'image laisse sa place au plein écran */
+@media (pointer:coarse){ #btn-image{display:none} }
 .hud{bottom:calc(12px + env(safe-area-inset-bottom))}
 @media (max-width:760px){
   .hud{bottom:calc(10px + env(safe-area-inset-bottom))}
@@ -660,6 +677,9 @@ kbd{font:600 12px Outfit,sans-serif;background:var(--ivoire-2);border:1px solid 
         <button id="btn-coupe" class="hud-btn" aria-pressed="false"
           title="Coupe temporelle : qui est vivant, qui règne à une année donnée (touche C)" aria-label="Coupe temporelle">⟂<span class="hud-lib"> Coupe</span></button>
         <button id="btn-image" class="hud-btn" title="Exporter cette vue en image ou en PDF" aria-label="Exporter en image">⤓<span class="hud-lib"> Image</span></button>
+        <button id="btn-plein-ecran" class="hud-btn" hidden title="Plein écran" aria-label="Plein écran" aria-pressed="false">
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" aria-hidden="true">
+            <path d="M4 9V4h5M15 4h5v5M20 15v5h-5M9 20H4v-5"/></svg></button>
         <span id="echelle" class="echelle"></span>
       </div>
 
@@ -774,7 +794,7 @@ kbd{font:600 12px Outfit,sans-serif;background:var(--ivoire-2);border:1px solid 
    ============================================================ */
 const LS_KEY = 'chronologie-frise-v1';
 /* À changer à chaque modification de ce fichier : « Publier » propose alors de remettre l'application en ligne */
-const VERSION_APPLI = '2026-10-06';
+const VERSION_APPLI = '2026-10-06.2';
 /* Version en ligne (consultation, sur téléphone) : la page est servie par un site web au lieu d'être
    ouverte depuis l'ordinateur. Les données viennent du fichier publié ; l'édition se fait sur l'ordinateur. */
 const LECTURE = (/^https?:$/.test(location.protocol) && !/^(localhost|127\.0\.0\.1|\[::1\])$/.test(location.hostname))
@@ -2538,8 +2558,8 @@ function fusionner(imp, avecEpoques){
 const canvas = $('#frise-canvas');
 const ctx = canvas.getContext('2d');
 const MAX_PPA = 260;            // pixels par an au zoom max
-const REGLE_H = 54;             // hauteur de la règle des années
-const EPOQUES_H = 22;           // bande des époques, sous la règle
+let REGLE_H = 54;               // hauteur de la règle des années (plus basse sur un écran peu haut)
+let EPOQUES_H = 22;             // bande des époques, sous la règle
 let AXE_H = REGLE_H;            // hauteur totale de l'en-tête fixe (règle + époques)
 let zonesEpoques = [];          // segments cliquables de la bande des époques [{x,w,ep,fleche}]
 let hoverEpoque = null;
@@ -2609,7 +2629,9 @@ function clampVue(W){
   vue.ppa = clamp(vue.ppa, lim.min, lim.max);
   const p = plageCadre();
   const visible = W / vue.ppa;
-  vue.debut = clamp(vue.debut, p.min, Math.max(p.min, p.max - visible));
+  const f = fichePetitEcran();   // fiche sur le côté : on peut amener la fin de la période à sa gauche
+  const extra = f && f.cote ? (W - f.p.offsetLeft + 12) / vue.ppa : 0;
+  vue.debut = clamp(vue.debut, p.min, Math.max(p.min, p.max - visible + extra));
 }
 function ajusterTout(){
   const W = largeurScene();
@@ -2653,7 +2675,33 @@ function choisirPas(ppa){
 }
 function reinitAffichage(){ hauteursAff = new Map(); yAff = new Map(); scrollY = 0; }
 function hauteurVisible(){ return Math.max(0, (canvas.clientHeight || 300) - AXE_H); }
-function clampScroll(){ scrollY = clamp(scrollY, 0, Math.max(0, contenuH - hauteurVisible())); }
+function clampScroll(){ scrollY = clamp(scrollY, 0, Math.max(0, contenuH + margePanneau() - hauteurVisible())); }
+
+/* Fiche ouverte sur petit écran : en bas (téléphone en hauteur) ou sur le côté (à l'horizontale) */
+function fichePetitEcran(){
+  const p = $('#panneau');
+  if (!p.classList.contains('ouvert') || !(ecranEtroit() || window.innerHeight <= 500)) return null;
+  return { p, cote: p.offsetLeft > largeurScene() * 0.3 };
+}
+/* Fiche en bas : on peut faire défiler les dernières bandes jusqu'au-dessus d'elle */
+function margePanneau(){
+  const f = fichePetitEcran();
+  return f && !f.cote ? f.p.offsetHeight + 10 : 0;
+}
+/* Amène l'élément choisi dans la partie de la frise que la fiche ne cache pas */
+function degagerSousFiche(id){
+  const f = fichePetitEcran();
+  const z = id && zonesHit.find(z => z.id === id);
+  if (!f || !z) return;
+  if (f.cote){
+    const libre = f.p.offsetLeft - 12;
+    if (z.ax > libre - 30 || z.ax < 0){ vue.debut += (z.ax - libre * 0.4) / vue.ppa; clampVue(largeurScene()); }
+  } else {
+    const libre = f.p.offsetTop - 10;
+    if (z.y + z.h > libre){ scrollY += z.y + z.h - libre + 16; clampScroll(); }
+  }
+  redessiner();
+}
 
 /* ============================================================
    9. CANVAS — dimensionnement et dessin
@@ -2895,6 +2943,9 @@ function dessinerGroupe(gr, y, W, off, couleur, enAvant){
 function dessiner(){
   const W = rendu ? rendu.W : (canvas.clientWidth || largeurScene());
   const H = rendu ? rendu.H : (canvas.clientHeight || 300);
+  const compact = !rendu && H < 360;   // téléphone à l'horizontale : en-tête plus bas
+  REGLE_H = compact ? 42 : 54;
+  EPOQUES_H = compact ? 18 : 22;
   AXE_H = REGLE_H + (afficherEpoques() ? EPOQUES_H : 0);
   ctx.clearRect(0, 0, W, H);
   ctx.fillStyle = '#141d27';
@@ -3163,7 +3214,9 @@ function dessiner(){
   ombre.addColorStop(0, 'rgba(0,0,0,0.28)'); ombre.addColorStop(1, 'rgba(0,0,0,0)');
   ctx.fillStyle = ombre;
   ctx.fillRect(0, AXE_H, W, 10);
-  const axisY = REGLE_H - 9;
+  const axisY = REGLE_H - (compact ? 8 : 9);
+  const T = compact ? 5 : 8;                 // demi-hauteur des graduations principales
+  const yAn = compact ? 3 : 6, yEre = compact ? 19 : 24;
 
   const pasMin = pas / 5;
   if (pasMin * vue.ppa >= 13){
@@ -3193,28 +3246,28 @@ function dessiner(){
     ctx.strokeStyle = 'rgba(220,207,169,0.35)';
     ctx.lineWidth = 1;
     ctx.setLineDash([2, 3]);
-    ctx.beginPath(); ctx.moveTo(Math.round(xJC) + 0.5, axisY - 8); ctx.lineTo(Math.round(xJC) + 0.5, axisY + 8); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(Math.round(xJC) + 0.5, axisY - T); ctx.lineTo(Math.round(xJC) + 0.5, axisY + T); ctx.stroke();
     ctx.setLineDash([]);
     if (visibles.every(t => Math.abs(t.x - xJC) > 44)){
       ctx.fillStyle = '#8a99ab';
       ctx.font = '9px Outfit, sans-serif';
       ctx.textAlign = 'center'; ctx.textBaseline = 'top';
-      ctx.fillText('J.-C.', xJC, 24);
+      ctx.fillText('J.-C.', xJC, yEre);
     }
   }
   visibles.forEach(({ a, x: xt }) => {
     const x = Math.round(xt) + 0.5;
     ctx.strokeStyle = 'rgba(220,207,169,0.55)';
     ctx.lineWidth = 1.5;
-    ctx.beginPath(); ctx.moveTo(x, axisY - 8); ctx.lineTo(x, axisY + 8); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(x, axisY - T); ctx.lineTo(x, axisY + T); ctx.stroke();
     ctx.fillStyle = '#dccfa9';
-    ctx.font = '15px Marcellus, serif';
+    ctx.font = (compact ? '14px' : '15px') + ' Marcellus, serif';
     ctx.textAlign = 'center'; ctx.textBaseline = 'top';
-    ctx.fillText(String(Math.abs(a)), x, 6);
+    ctx.fillText(String(Math.abs(a)), x, yAn);
     if (aDesNeg){
       ctx.fillStyle = '#73849a';
       ctx.font = '9px Outfit, sans-serif';
-      ctx.fillText(a < 0 ? 'AV. J.-C.' : (aDesPos ? 'AP. J.-C.' : ''), x, 24);
+      ctx.fillText(a < 0 ? 'AV. J.-C.' : (aDesPos ? 'AP. J.-C.' : ''), x, yEre);
     }
   });
   try { ctx.letterSpacing = '0px'; } catch(e){}
@@ -3552,7 +3605,11 @@ function finPointeur(ev){
             majCoupeSouris(mx);
           }
         }
-        else selectionner(elExact || trouverElement(mx, my, marge));
+        else {
+          const id = elExact || trouverElement(mx, my, marge);
+          selectionner(id);
+          degagerSousFiche(id);
+        }
       }
       panDepart = null;
       redessiner();
@@ -4243,6 +4300,14 @@ $('#btn-publier').addEventListener('click', () => {
 });
 $('#btn-publi-reglages').addEventListener('click', modalPublication);
 if (TACTILE) champRecherche.placeholder = 'Nom, date, événement…';
+/* Plein écran (téléphone) : cache la barre d'adresse de Chrome et les barres du système */
+const btnPleinEcran = $('#btn-plein-ecran');
+btnPleinEcran.hidden = !(TACTILE && document.fullscreenEnabled);
+btnPleinEcran.addEventListener('click', () => {
+  if (document.fullscreenElement) document.exitFullscreen().catch(() => {});
+  else document.documentElement.requestFullscreen({ navigationUI: 'hide' }).catch(() => toast('Plein écran indisponible ici.'));
+});
+document.addEventListener('fullscreenchange', () => btnPleinEcran.setAttribute('aria-pressed', !!document.fullscreenElement));
 
 charger();
 majDetail();
