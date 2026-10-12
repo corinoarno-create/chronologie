@@ -797,7 +797,7 @@ kbd{font:600 12px Outfit,sans-serif;background:var(--ivoire-2);border:1px solid 
    ============================================================ */
 const LS_KEY = 'chronologie-frise-v1';
 /* À changer à chaque modification de ce fichier : « Publier » propose alors de remettre l'application en ligne */
-const VERSION_APPLI = '2026-10-06.7';
+const VERSION_APPLI = '2026-10-12.1';
 /* Version en ligne (consultation, sur téléphone) : la page est servie par un site web au lieu d'être
    ouverte depuis l'ordinateur. Les données viennent du fichier publié ; l'édition se fait sur l'ordinateur. */
 const LECTURE = (/^https?:$/.test(location.protocol) && !/^(localhost|127\.0\.0\.1|\[::1\])$/.test(location.hostname))
@@ -917,7 +917,7 @@ function seed(){
     vues: [],
     vueActive: null,
     epoques: epoquesParDefaut(),
-    affichage: { detail: 'normal', epoques: true }
+    affichage: { detail: 'normal', epoques: true, explorer: { ouvertes: [], masquees: [] } }
   };
 }
 
@@ -1007,6 +1007,16 @@ function normaliser(obj){
       })
     : epoquesParDefaut();
   if (typeof obj.affichage.epoques !== 'boolean') obj.affichage.epoques = true;
+  /* Vue complète : catégories dépliées et sous-catégories masquées (par défaut tout est replié) */
+  const ex = obj.affichage.explorer && typeof obj.affichage.explorer === 'object' ? obj.affichage.explorer : {};
+  const idsListe = l => [...new Set((Array.isArray(l) ? l : []).map(v => String(v ?? '')).filter(Boolean))];
+  obj.affichage.explorer = {
+    ouvertes: idsListe(ex.ouvertes).map(i => i === ID_SANS ? i : ident(i)),
+    masquees: idsListe(ex.masquees).map(i => {
+      const m = i.match(/^([cs]):(.+)$/);
+      return m ? m[1] + ':' + ident(m[2]) : i === ID_SANS ? i : null;
+    }).filter(Boolean)
+  };
   return obj;
 }
 
@@ -1628,6 +1638,8 @@ function recevoir(obj){
     nouv.vueActive = nouv.vues.concat(vuesLocales).some(v => v.id === state.vueActive) ? state.vueActive : null;
     nouv.affichage.detail = state.affichage.detail;
   }
+  /* Catégories dépliées / masquées : propres à ce téléphone (repliées à la première ouverture) */
+  nouv.affichage.explorer = premiere ? { ouvertes: [], masquees: [] } : state.affichage.explorer;
   state = nouv;
   dernierEtat = instantane();
   versionDonnees++;
@@ -1726,11 +1738,118 @@ function calculerToutesBandes(){
   const liste = [];
   cats().forEach(c => {
     if (!c.sousCategories.length || utilisees.has('c:' + c.id))
-      liste.push({ id: 'c:' + c.id, nom: c.nom, couleur: c.couleur, parent: null });
-    c.sousCategories.forEach(s => liste.push({ id: 's:' + s.id, nom: s.nom, couleur: s.couleur, parent: c.nom }));
+      liste.push({ id: 'c:' + c.id, nom: c.nom, couleur: c.couleur, parent: null, cat: c.id });
+    c.sousCategories.forEach(s => liste.push({ id: 's:' + s.id, nom: s.nom, couleur: s.couleur, parent: c.nom, cat: c.id }));
   });
-  if (utilisees.has(ID_SANS)) liste.push({ id: ID_SANS, nom: 'Sans catégorie', couleur: '#9aa7b4', parent: null });
+  if (utilisees.has(ID_SANS)) liste.push({ id: ID_SANS, nom: 'Sans catégorie', couleur: '#9aa7b4', parent: null, cat: ID_SANS });
   return liste;
+}
+
+/* ---------- Vue complète : catégories repliables ----------
+   Dans la vue complète, les bandes sont regroupées par catégorie. Repliée, une catégorie tient sur
+   une ligne de repères (un trait par élément) ; dépliée, elle montre ses sous-catégories, chacune
+   avec une case à cocher pour l'afficher ou la masquer. C'est une préférence de cet appareil
+   (state.affichage.explorer) : ni les données, ni l'historique, ni les vues d'étude ne changent. */
+const explo = () => state.affichage.explorer;
+const estOuverte = cid => explo().ouvertes.includes(cid);
+const estMasquee = bid => explo().masquees.includes(bid);
+const groupesBandes = () => memo('groupes', () => {
+  const groupes = [];
+  toutesBandes().forEach(b => {
+    let g = groupes.find(g => g.id === b.cat);
+    if (!g){
+      const c = getCat(b.cat);
+      groupes.push(g = { id: b.cat, nom: c ? c.nom : b.nom, couleur: c ? c.couleur : b.couleur, bandes: [] });
+    }
+    g.bandes.push(b);
+  });
+  return groupes;
+});
+const groupeDe = bid => groupesBandes().find(g => g.bandes.some(b => b.id === bid)) || null;
+/* Lignes dessinées sur la frise :
+   'bande' (bande ouverte), 'titre' (en-tête d'une catégorie dépliée),
+   'repli' (catégorie repliée : repères), 'masquee' (sous-catégorie décochée) */
+const lignesFrise = () => memo('lignes', () => {
+  if (vueCourante()) return bandesAffichees().map(b => ({ type: 'bande', b, cle: b.id }));
+  const lignes = [];
+  groupesBandes().forEach(g => {
+    const seule = g.bandes.length === 1;
+    if (!estOuverte(g.id)){
+      lignes.push({ type: 'repli', g, cle: 'g:' + g.id, bandes: g.bandes.filter(b => !estMasquee(b.id)) });
+      return;
+    }
+    if (!seule) lignes.push({ type: 'titre', g, cle: 'g:' + g.id });
+    g.bandes.forEach(b => {
+      const nom = !seule && b.id.startsWith('c:') ? 'Autres' : b.nom;
+      if (estMasquee(b.id)) lignes.push({ type: 'masquee', b, g, nom, cle: b.id });
+      else lignes.push({ type: 'bande', b, g, nom, cle: b.id, seule, coche: !seule });
+    });
+  });
+  return lignes;
+});
+/* Nombre d'éléments principaux par bande */
+const compteBandes = () => memo('compte', () => {
+  const n = new Map();
+  els().forEach(e => { if (!e.parentId) n.set(bandeDe(e), (n.get(bandeDe(e)) || 0) + 1); });
+  return n;
+});
+function modifierExplo(fn){
+  fn(explo());
+  versionDonnees++;
+  sauver();
+  rendreVues();
+  redessiner();
+}
+function basculerCategorie(cid){
+  modifierExplo(x => { x.ouvertes = estOuverte(cid) ? x.ouvertes.filter(i => i !== cid) : [...x.ouvertes, cid]; });
+}
+function basculerBande(bid){
+  const masquer = !estMasquee(bid);
+  if (masquer && selectionId){
+    const sel = byId(selectionId), princ = sel && (sel.parentId ? byId(sel.parentId) : sel);
+    if (princ && bandeDe(princ) === bid){ selectionId = null; majPanneau(); }
+  }
+  modifierExplo(x => { x.masquees = masquer ? [...x.masquees, bid] : x.masquees.filter(i => i !== bid); });
+}
+/* Case « tout » d'une catégorie dépliée : tout afficher, ou tout masquer si tout est déjà affiché */
+function basculerToutesBandes(cid){
+  const g = groupesBandes().find(g => g.id === cid);
+  if (!g) return;
+  const ids = g.bandes.map(b => b.id);
+  const toutes = ids.every(i => !estMasquee(i));
+  if (toutes && selectionId){
+    const sel = byId(selectionId), princ = sel && (sel.parentId ? byId(sel.parentId) : sel);
+    if (princ && ids.includes(bandeDe(princ))){ selectionId = null; majPanneau(); }
+  }
+  modifierExplo(x => {
+    x.masquees = x.masquees.filter(i => !ids.includes(i));
+    if (toutes) x.masquees.push(...ids);
+  });
+}
+function toutReplier(){
+  modifierExplo(x => { x.ouvertes = []; });
+}
+/* Tout voir : toutes les catégories dépliées, toutes les sous-catégories affichées */
+function toutDeplier(){
+  const avant = JSON.stringify(explo());
+  modifierExplo(x => { x.ouvertes = groupesBandes().map(g => g.id); x.masquees = []; });
+  toast('Tout est déplié.', { libelle: 'Annuler', fn: () => modifierExplo(x => Object.assign(x, JSON.parse(avant))) });
+}
+/* Montre une bande dans la vue complète (catégorie dépliée, sous-catégorie cochée).
+   Renvoie true si l'affichage a changé. */
+function revelerBande(bid){
+  if (vueCourante()) return false;
+  const g = groupeDe(bid);
+  if (!g || (estOuverte(g.id) && !estMasquee(bid))) return false;
+  modifierExplo(x => {
+    x.masquees = x.masquees.filter(i => i !== bid);
+    if (!x.ouvertes.includes(g.id)) x.ouvertes.push(g.id);
+  });
+  return true;
+}
+function revelerElement(id){
+  const e = byId(id), princ = e && (e.parentId ? byId(e.parentId) : e);
+  return princ ? revelerBande(bandeDe(princ)) : false;
 }
 /* ---------- Époques ---------- */
 const epoquesTriees = () => [...state.epoques].sort((a, b) => a.debut - b.debut);
@@ -1772,7 +1891,8 @@ const vueCourante = () => toutesVues().find(v => v.id === state.vueActive) || nu
 function calculerBandesAffichees(){
   const toutes = toutesBandes();
   const v = vueCourante();
-  if (!v) return toutes.map(b => ({ ...b, cadre: true }));
+  /* Vue complète : les sous-catégories cochées (catégories repliées comprises) */
+  if (!v) return toutes.filter(b => !estMasquee(b.id)).map(b => ({ ...b, cadre: true }));
   const parId = new Map(toutes.map(b => [b.id, b]));
   return v.bandes.filter(b => parId.has(b.id)).map(b => ({ ...parId.get(b.id), cadre: b.cadre }));
 }
@@ -1791,10 +1911,20 @@ function rendreVues(){
       ${locale ? 'title="Vue créée sur ce téléphone"' : ''}>${echap(x.nom)}</button>`;
   });
   html += '<span class="chip-sep"></span>';
+  /* Vue complète : replier / déplier les catégories */
+  if (!v && groupesBandes().length){
+    const ex = explo();
+    if (ex.ouvertes.some(id => groupesBandes().some(g => g.id === id)))
+      html += `<button class="chip chip-sub" data-type="replier" title="Replier toutes les catégories">▸ Tout replier</button>`;
+    if (groupesBandes().some(g => !estOuverte(g.id)) || ex.masquees.length)
+      html += `<button class="chip chip-sub" data-type="deplier" title="Déplier toutes les catégories et afficher toutes les sous-catégories">▾ Tout déplier</button>`;
+  }
   /* Sur le téléphone, seules les vues créées sur le téléphone se composent */
   if (v && (!LECTURE || estVueLocale(v)))
     html += `<button class="chip chip-sub" data-type="edit-vue" title="Choisir et ordonner les bandes de « ${echap(v.nom)} »">✎ Composer</button>`;
-  html += `<button class="chip chip-sub" data-type="nouvelle-vue">＋ Nouvelle vue</button>`;
+  html += !v && explo().masquees.length
+    ? `<button class="chip chip-sub" data-type="nouvelle-vue" title="Créer une vue d’étude avec les sous-catégories affichées">＋ Enregistrer comme vue</button>`
+    : `<button class="chip chip-sub" data-type="nouvelle-vue">＋ Nouvelle vue</button>`;
   $('#filtres').innerHTML = html;
 }
 
@@ -1820,6 +1950,8 @@ $('#filtres').addEventListener('click', e => {
   if (b.dataset.type === 'vue') activerVue(b.dataset.id);
   else if (b.dataset.type === 'edit-vue') modalVue(vueCourante());
   else if (b.dataset.type === 'nouvelle-vue') modalVue(null);
+  else if (b.dataset.type === 'replier') toutReplier();
+  else if (b.dataset.type === 'deplier') toutDeplier();
 });
 
 function modalVue(v){
@@ -1917,6 +2049,8 @@ function modalVue(v){
    ============================================================ */
 function selectionner(id){
   selectionId = id;
+  /* Vue complète : un élément choisi dans une catégorie repliée (repère, recherche…) la déplie */
+  if (id && revelerElement(id)) defilerVers = id;
   majPanneau();
   redessiner();
 }
@@ -2470,11 +2604,8 @@ function retablirEpoques(){
 /* Cadrer la frise sur une époque (en repassant en vue complète si elle est hors de la vue d'étude) */
 function allerEpoque(p){
   montrerVue('frise');
-  const cadre = plageCadre();
-  if (pos(p.fin) < cadre.min || pos(p.debut) > cadre.max){
-    activerVue(null);
-    toast('Époque hors de la période de cette vue : affichage de la vue complète.');
-  }
+  elargirSi(() => { const c = plageCadre(); return pos(p.fin) < c.min || pos(p.debut) > c.max; },
+    'Époque hors de la période de cette vue : affichage de la vue complète.');
   cadrerSur(p.debut, p.fin);
 }
 /* Époque précédente (-1) ou suivante (+1) par rapport au centre de l'écran */
@@ -2670,6 +2801,8 @@ const ENTETE_H = 24;            // en-tête d'une bande
 const VOIE_H = 28;              // hauteur d'une voie dans une bande
 const ELT_H = 20;               // hauteur d'une capsule
 const BANDE_PAD = 8;            // marge basse d'une bande ouverte
+const REPLI_H = 40;             // catégorie repliée : en-tête + ligne de repères
+const MASQUEE_H = 22;           // sous-catégorie décochée (vue complète)
 const MARGE_BAS = 72;           // espace sous la dernière bande (commandes de zoom)
 const POLICE_ELT = '500 13px Outfit, sans-serif';
 const MOUV_REDUIT = !!(window.matchMedia && matchMedia('(prefers-reduced-motion: reduce)').matches);
@@ -3070,6 +3203,145 @@ function dessinerGroupe(gr, y, W, off, couleur, enAvant){
   zonesGroupes.push({ x: gx, y, w: gr.w, h: ELT_H, gr });
 }
 
+/* ---------- Vue complète : en-têtes de catégorie, cases à cocher, repères ---------- */
+function dessinerFleche(x, y, ouverte, survol){
+  ctx.fillStyle = survol ? '#ffffff' : '#c9bf9f';
+  ctx.beginPath();
+  if (ouverte){ ctx.moveTo(x - 4.5, y - 2.5); ctx.lineTo(x + 4.5, y - 2.5); ctx.lineTo(x, y + 3); }
+  else { ctx.moveTo(x - 2.5, y - 4.5); ctx.lineTo(x + 3, y); ctx.lineTo(x - 2.5, y + 4.5); }
+  ctx.closePath();
+  ctx.fill();
+}
+/* etat : 'oui', 'non' ou 'partiel' */
+function dessinerCase(x, y, etat, couleur, survol){
+  const s = 12;
+  arrondi(x - s / 2, y - s / 2, s, s, 3);
+  if (etat === 'non'){
+    ctx.strokeStyle = survol ? '#e3cf95' : '#7d8b9b';
+    ctx.lineWidth = 1.3;
+    ctx.stroke();
+    return;
+  }
+  ctx.fillStyle = survol ? '#ffffff' : rgba(couleur, 0.9);
+  ctx.fill();
+  ctx.strokeStyle = '#141d27';
+  ctx.lineWidth = 1.8;
+  ctx.beginPath();
+  if (etat === 'partiel'){ ctx.moveTo(x - 3, y); ctx.lineTo(x + 3, y); }
+  else { ctx.moveTo(x - 3, y + 0.2); ctx.lineTo(x - 0.8, y + 2.6); ctx.lineTo(x + 3.2, y - 2.6); }
+  ctx.stroke();
+}
+/* Filet vertical qui rattache les sous-catégories à leur catégorie */
+function dessinerFilet(y0, h, couleur){
+  ctx.fillStyle = rgba(lisible(couleur), 0.35);
+  ctx.fillRect(11, y0, 2, h);
+}
+function dessinerLigneCategorie(m, y0, hy, W, xDe, anCoupe, tol){
+  const l = m.l, g = l.g;
+  const couleur = lisible(l.type === 'masquee' ? m.b.couleur : g.couleur);
+  ctx.textAlign = 'left'; ctx.textBaseline = 'middle';
+
+  if (l.type === 'masquee'){
+    /* Sous-catégorie décochée : case vide, nom estompé */
+    const survol = hoverBande === 'cocher:' + m.b.id;
+    dessinerFilet(y0, m.h, g.couleur);
+    const cy = y0 + MASQUEE_H / 2;
+    dessinerCase(27, cy, 'non', couleur, survol);
+    ctx.fillStyle = rgba(couleur, 0.4);
+    cercle(40, cy, 3.5); ctx.fill();
+    ctx.font = '600 10.5px Outfit, sans-serif';
+    try { ctx.letterSpacing = '1.5px'; } catch(e){}
+    const nom = (l.nom || m.b.nom).toUpperCase();
+    ctx.fillStyle = survol ? '#e3cf95' : '#6f7f92';
+    ctx.fillText(nom, 51, cy);
+    let xt = 51 + ctx.measureText(nom).width;
+    try { ctx.letterSpacing = '0px'; } catch(e){}
+    ctx.font = '11px Outfit, sans-serif';
+    const t = '· ' + m.n;
+    ctx.fillStyle = '#5f6e80';
+    ctx.fillText(t, xt + 7, cy);
+    xt += 7 + ctx.measureText(t).width;
+    ctx.fillStyle = 'rgba(243,238,225,0.05)';
+    ctx.fillRect(0, y0 + m.h - 1, W, 1);
+    zonesBandes.push({ x: 0, y: y0, w: xt + 10, h: MASQUEE_H, cle: 'cocher:' + m.b.id, action: 'cocher', cible: m.b.id });
+    return;
+  }
+
+  /* Catégorie : en-tête (dépliée) ou en-tête + repères (repliée) */
+  const ouverte = l.type === 'titre';
+  const survol = hoverBande === 'plier:' + g.id;
+  ctx.fillStyle = rgba(couleur, ouverte ? 0.08 : 0.045);
+  ctx.fillRect(0, y0, W, m.h);
+  ctx.fillStyle = 'rgba(243,238,225,0.11)';
+  ctx.fillRect(0, y0 + m.h - 1, W, 1);
+  dessinerFleche(12, hy, ouverte, survol);
+  ctx.fillStyle = couleur;
+  cercle(26, hy, 4.5); ctx.fill();
+  ctx.font = '700 11.5px Outfit, sans-serif';
+  try { ctx.letterSpacing = '1.6px'; } catch(e){}
+  const nom = g.nom.toUpperCase();
+  ctx.fillStyle = survol ? '#ffffff' : '#ece2c6';
+  ctx.fillText(nom, 36, hy);
+  let xt = 36 + ctx.measureText(nom).width;
+  try { ctx.letterSpacing = '0px'; } catch(e){}
+
+  const nB = g.bandes.length, nAff = g.bandes.filter(b => !estMasquee(b.id)).length;
+  if (ouverte){
+    zonesBandes.push({ x: 0, y: y0, w: xt + 8, h: ENTETE_H, cle: 'plier:' + g.id, action: 'plier', cible: g.id });
+    /* Case « toutes » : afficher / masquer toutes les sous-catégories */
+    const survolT = hoverBande === 'tout:' + g.id;
+    const x0 = xt + 18;
+    dessinerCase(x0 + 6, hy, nAff === nB ? 'oui' : nAff ? 'partiel' : 'non', couleur, survolT);
+    ctx.font = '11.5px Outfit, sans-serif';
+    ctx.fillStyle = survolT ? '#e3cf95' : '#8d9bab';
+    const t = 'toutes';
+    ctx.fillText(t, x0 + 17, hy);
+    zonesBandes.push({ x: x0 - 4, y: y0, w: 25 + ctx.measureText(t).width, h: ENTETE_H, cle: 'tout:' + g.id, action: 'tout', cible: g.id });
+    return;
+  }
+
+  /* Repliée : résumé, puis un repère par élément des sous-catégories cochées */
+  const trouves = surlignage ? m.items.filter(e => surlignage.has(e.id)).length : 0;
+  let t = !nAff ? 'aucune sous-catégorie affichée'
+    : m.n + ' élément' + (m.n > 1 ? 's' : '') + (nB > 1 ? (nAff < nB ? ` · ${nAff} sur ${nB} sous-catégories` : ` · ${nB} sous-catégories`) : '');
+  ctx.font = '11.5px Outfit, sans-serif';
+  ctx.fillStyle = survol ? '#e3cf95' : '#8d9bab';
+  ctx.fillText(t, xt + 12, hy);
+  xt += 12 + ctx.measureText(t).width;
+  if (trouves){
+    ctx.font = '600 11.5px Outfit, sans-serif';
+    ctx.fillStyle = '#ecd083';
+    t = '· ' + trouves + ' trouvé' + (trouves > 1 ? 's' : '');
+    ctx.fillText(t, xt + 7, hy);
+    xt += 7 + ctx.measureText(t).width;
+  }
+  zonesBandes.push({ x: 0, y: y0, w: xt + 10, h: ENTETE_H, cle: 'plier:' + g.id, action: 'plier', cible: g.id });
+
+  const ty = y0 + ENTETE_H + 1, th = 11;
+  const estPer = e => e.fin != null && e.fin !== e.debut;
+  /* Périodes d'abord (barres fines), dates ponctuelles par-dessus (traits) */
+  [...m.items.filter(estPer), ...m.items.filter(e => !estPer(e))].forEach(e => {
+    const per = estPer(e);
+    const x0 = xDe(pos(e.debut)), x1 = per ? Math.max(x0 + 2, xDe(pos(e.fin))) : x0;
+    if (x1 < -4 || x0 > W + 4) return;
+    const trouve = !!surlignage && surlignage.has(e.id);
+    const fort = trouve || e.id === hoverId || e.id === selectionId;
+    const c = trouve ? '#ecd083' : lisible(couleurDe(e));
+    ctx.globalAlpha = (surlignage ? !trouve : anCoupe != null && !enCours(e, anCoupe, tol)) ? 0.18 : 1;
+    if (per){
+      ctx.fillStyle = rgba(c, fort ? 0.85 : 0.32);
+      ctx.fillRect(x0, ty + 3, x1 - x0, th - 6);
+      ctx.fillStyle = rgba(c, fort ? 1 : 0.8);
+      ctx.fillRect(x0 - 0.75, ty + 1, 1.5, th - 2);
+    } else {
+      ctx.fillStyle = e.id === hoverId || e.id === selectionId ? '#ffffff' : c;
+      ctx.fillRect(x0 - 1, ty, 2, th);
+    }
+    ctx.globalAlpha = 1;
+    zonesHit.push({ x: x0 - 3, y: ty - 2, w: x1 - x0 + 6, h: th + 4, id: e.id, ax: x0 });
+  });
+}
+
 function dessiner(){
   const W = rendu ? rendu.W : (canvas.clientWidth || largeurScene());
   const H = rendu ? rendu.H : (canvas.clientHeight || 300);
@@ -3112,8 +3384,24 @@ function dessiner(){
   };
   const nouvHauteurs = new Map(), nouvY = new Map();
   const off = -vue.debut * vue.ppa;      // décalage entre coordonnées absolues et écran
+  /* Une ligne qui apparaît (catégorie que l'on déplie) s'ouvre depuis une hauteur nulle */
+  const hDepart = cle => hauteursAff.has(cle) || !hauteursAff.size ? hauteursAff.get(cle) : 0;
   let cumul = 0;
-  const mises = bandes.map(b => {
+  const mises = lignesFrise().map(l => {
+    if (l.type !== 'bande'){
+      /* En-tête de catégorie, catégorie repliée ou sous-catégorie masquée */
+      const items = l.type === 'repli' ? l.bandes.flatMap(b => (parBande.get(b.id) || { princ: [] }).princ) : [];
+      const cible = l.type === 'repli' ? REPLI_H : l.type === 'titre' ? ENTETE_H + 2 : MASQUEE_H;
+      const h = lerp(hDepart(l.cle), cible);
+      nouvHauteurs.set(l.cle, h);
+      const g = l.g;
+      const m = { l, b: l.type === 'masquee' ? l.b : { id: l.cle, nom: g.nom, couleur: g.couleur }, items,
+        vis: [], grVis: [], vide: true, h, top: cumul,
+        n: l.type === 'masquee' ? (compteBandes().get(l.b.id) || 0) : items.length };
+      cumul += h;
+      return m;
+    }
+    const b = l.b;
     const { princ, tous } = parBande.get(b.id);
     let min = Infinity, max = -Infinity;
     princ.forEach(e => { min = Math.min(min, e.debut); max = Math.max(max, finDe(e)); });
@@ -3144,9 +3432,9 @@ function dessiner(){
     const nVoies = voies.length + (grVis.length ? 1 : 0);
     const vide = !nVoies;
     const cible = vide ? ENTETE_H + 2 : ENTETE_H + nVoies * VOIE_H + BANDE_PAD;
-    const h = lerp(hauteursAff.get(b.id), cible);
+    const h = lerp(hDepart(b.id), cible);
     nouvHauteurs.set(b.id, h);
-    const m = { b, vis, grVis, yGr, vide, min, max, h, top: cumul, n: princ.length };
+    const m = { l, b, vis, grVis, yGr, vide, min, max, h, top: cumul, n: princ.length };
     cumul += h;
     return m;
   });
@@ -3252,18 +3540,34 @@ function dessiner(){
 
     /* En-tête : nom de la bande, toujours à gauche */
     const hy = y0 + ENTETE_H / 2 + 1;
-    const survol = hoverBande === m.b.id;
+    const l = m.l;
+    if (l.type !== 'bande'){
+      dessinerLigneCategorie(m, y0, hy, W, xDe, anCoupe, tol);
+      ctx.restore();
+      return;
+    }
+    /* Vue complète : sous-catégorie (case à cocher, en retrait) ou catégorie à bande unique (flèche) */
+    const sousCat = !!l.coche, xNom = sousCat ? 51 : l.seule ? 36 : 27;
+    if (sousCat) dessinerFilet(y0, m.h, l.g.couleur);
+    if (l.seule){
+      dessinerFleche(12, hy, true, hoverBande === 'plier:' + l.g.id);
+    }
+    if (sousCat){
+      dessinerCase(27, hy, 'oui', couleur, hoverBande === 'cocher:' + m.b.id);
+      zonesBandes.push({ x: 0, y: y0, w: 35, h: ENTETE_H, cle: 'cocher:' + m.b.id, action: 'cocher', cible: m.b.id });
+    }
+    const survol = hoverBande === m.b.id || (l.seule && hoverBande === 'plier:' + l.g.id);
     ctx.fillStyle = couleur;
-    cercle(16, hy, 4); ctx.fill();
+    cercle(xNom - 11, hy, 4); ctx.fill();
     ctx.font = '600 11px Outfit, sans-serif';
     ctx.textAlign = 'left'; ctx.textBaseline = 'middle';
     try { ctx.letterSpacing = '1.5px'; } catch(e){}
-    const nom = m.b.nom.toUpperCase();
+    const nom = (l.nom || m.b.nom).toUpperCase();
     ctx.fillStyle = survol ? '#ffffff' : !m.vide ? '#ddd3b8' : '#8c98a6';
-    ctx.fillText(nom, 27, hy);
-    let xt = 27 + ctx.measureText(nom).width;
+    ctx.fillText(nom, xNom, hy);
+    let xt = xNom + ctx.measureText(nom).width;
     try { ctx.letterSpacing = '0px'; } catch(e){}
-    if (m.b.parent){
+    if (m.b.parent && !l.g){
       ctx.font = '11px Outfit, sans-serif';
       ctx.fillStyle = '#6f7f92';
       const t = '· ' + m.b.parent;
@@ -3284,7 +3588,8 @@ function dessiner(){
       ctx.fillText(t, xt + 12, hy);
       xt += 12 + ctx.measureText(t).width;
     }
-    zonesBandes.push({ x: 0, y: y0, w: xt + 10, h: ENTETE_H, bande: m.b.id, n: m.n });
+    if (l.seule) zonesBandes.push({ x: 0, y: y0, w: xt + 10, h: ENTETE_H, cle: 'plier:' + l.g.id, action: 'plier', cible: l.g.id });
+    else zonesBandes.push({ x: sousCat ? 35 : 0, y: y0, w: xt + 10 - (sousCat ? 35 : 0), h: ENTETE_H, cle: m.b.id, bande: m.b.id, n: m.n });
 
     m.vis.forEach(g => dessinerElement(g, y0 + g.y, W, off, surlignage
       ? !surlignage.has(g.e.id)
@@ -3716,7 +4021,7 @@ canvas.addEventListener('pointermove', ev => {
   const trouve = trouverElement(mx, my);
   const gr = trouve ? null : trouverGroupe(mx, my);
   const zb = trouve || gr ? null : trouverBande(mx, my);
-  const bande = zb && zb.n ? zb.bande : null;
+  const bande = zb && (zb.action || zb.n) ? zb.cle : null;
   const ze = trouverEpoque(mx, my);
   const ep = ze ? ze.ep : null;
   if (trouve !== hoverId || bande !== hoverBande || gr !== hoverGroupe || ep !== hoverEpoque){
@@ -3737,6 +4042,8 @@ canvas.addEventListener('pointermove', ev => {
     const reste = gr.items.length - 6;
     tip.innerHTML = `<strong>${gr.items.length} élément${gr.items.length > 1 ? 's' : ''} masqué${gr.items.length > 1 ? 's' : ''}</strong>
       <span>${noms}${reste > 0 ? `<br>… et ${reste} autre${reste > 1 ? 's' : ''}` : ''}<br><em>Cliquer pour zoomer</em></span>`;
+  } else if (bande && zb.action){
+    tip.innerHTML = infoAction(zb);
   } else if (bande){
     tip.innerHTML = `<strong>Cadrer sur cette bande</strong><span>${zb.n} élément${zb.n > 1 ? 's' : ''}</span>`;
   } else if (ep){
@@ -3752,6 +4059,25 @@ canvas.addEventListener('pointermove', ev => {
     tip.hidden = true;
   }
 });
+/* Clic sur un en-tête de la vue complète : déplier / replier, cocher / décocher */
+function actionBande(zb){
+  if (zb.action === 'plier') basculerCategorie(zb.cible);
+  else if (zb.action === 'cocher') basculerBande(zb.cible);
+  else if (zb.action === 'tout') basculerToutesBandes(zb.cible);
+  $('#tooltip').hidden = true;
+}
+function infoAction(zb){
+  if (zb.action === 'plier'){
+    const ouverte = estOuverte(zb.cible);
+    return ouverte ? '<strong>Replier la catégorie</strong>'
+      : '<strong>Déplier la catégorie</strong><span>Voir ses sous-catégories et choisir celles à afficher</span>';
+  }
+  if (zb.action === 'cocher') return estMasquee(zb.cible)
+    ? '<strong>Afficher cette sous-catégorie</strong>' : '<strong>Masquer cette sous-catégorie</strong>';
+  const g = groupesBandes().find(g => g.id === zb.cible);
+  return g && g.bandes.every(b => !estMasquee(b.id))
+    ? '<strong>Masquer toutes les sous-catégories</strong>' : '<strong>Afficher toutes les sous-catégories</strong>';
+}
 function finPointeur(ev){
   if (pointeurs.has(ev.pointerId)){
     pointeurs.delete(ev.pointerId);
@@ -3778,6 +4104,7 @@ function finPointeur(ev){
         const zb = gr ? null : trouverBande(mx, my);
         if (ze) allerEpoque(ze.ep);
         else if (gr) ouvrirGroupe(gr, mx);
+        else if (zb && zb.action) actionBande(zb);
         else if (zb && zb.n) cadrerSurBande(zb.bande);
         else if (coupe.actif){
           if (my >= AXE_H && coupe.centre){
@@ -4005,7 +4332,7 @@ function centrerSur(id){
   if (!e) return;
   /* Si l'élément n'est pas dans la vue d'étude active, repasser en vue complète */
   const cible = e.parentId ? byId(e.parentId) : e;
-  if (cible && !bandesAffichees().some(b => b.id === bandeDe(cible))){
+  if (cible && vueCourante() && !bandesAffichees().some(b => b.id === bandeDe(cible))){
     state.vueActive = null;
     sauver(); rendreVues();
     toast('Élément hors de la vue actuelle : affichage de la vue complète.');
@@ -4015,6 +4342,8 @@ function centrerSur(id){
   defilerVers = id;
   montrerVue('frise');
   requestAnimationFrame(() => {
+    /* Vue complète : déplier sa catégorie (avant de cadrer : la période affichée peut s'élargir) */
+    if (cible) revelerBande(bandeDe(cible));
     dimensionner();
     const W = largeurScene();
     const fin = finDe(e);
@@ -4225,10 +4554,16 @@ function marquerActif(i){
 }
 /* S'assurer qu'une année est dans le cadre de la vue active, sinon repasser en vue complète */
 function rendreAtteignable(min, max){
-  const p = plageCadre();
-  if (pos(min) < p.min || pos(max) > p.max){
-    activerVue(null);
-    toast('Hors de la période de cette vue : affichage de la vue complète.');
+  elargirSi(() => { const p = plageCadre(); return pos(min) < p.min || pos(max) > p.max; },
+    'Hors de la période de cette vue : affichage de la vue complète.');
+}
+/* Hors du cadre : repasser en vue complète, puis, s'il le faut, réafficher les sous-catégories masquées */
+function elargirSi(dehors, message){
+  if (!dehors()) return;
+  if (vueCourante()){ activerVue(null); toast(message); }
+  if (dehors() && explo().masquees.length){
+    modifierExplo(x => { x.masquees = []; });
+    toast('Période hors des sous-catégories affichées : toutes sont réaffichées.');
   }
 }
 function executer(i){
@@ -4239,10 +4574,11 @@ function executer(i){
   if (a.kind === 'el') centrerSur(a.e.id);
   else if (a.kind === 'epoque') allerEpoque(a.p);
   else if (a.kind === 'bande'){
-    if (!bandesAffichees().some(b => b.id === a.b.id)){
+    if (vueCourante() && !bandesAffichees().some(b => b.id === a.b.id)){
       activerVue(null);
       toast('Bande absente de cette vue : affichage de la vue complète.');
     }
+    revelerBande(a.b.id);
     reinitAffichage();
     defilerVersBande = a.b.id;
     cadrerSurBande(a.b.id);
